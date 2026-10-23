@@ -288,6 +288,7 @@
         const ys = linspace(bounds[nameY], resolution);
         const zMatrix = [];
         const highlightedZ = [];
+        const regionCells = Array.from({length:ys.length - 1}, () => Array(xs.length - 1).fill(false));
         let minZ = Infinity, maxZ = -Infinity;
         for (const y of ys) {
           const row = [], highlightedRow = [];
@@ -307,14 +308,65 @@
           highlightedZ.push(highlightedRow);
         }
         if (!highlightedZ.some(row => row.some(value => value !== null))) throw new Error('当前积分区域内没有可显示的有效点');
-        const offset = Number.isFinite(minZ) && Number.isFinite(maxZ)
-          ? Math.max((maxZ - minZ) * 0.006, Math.max(Math.abs(minZ), 1) * 0.006)
-          : 0.006;
-        const raisedRegion = highlightedZ.map(row => row.map(value => value === null ? null : value + offset));
+        for (let row = 0; row < ys.length - 1; row++) {
+          for (let column = 0; column < xs.length - 1; column++) {
+            scope[nameX] = (xs[column] + xs[column + 1]) / 2;
+            scope[nameY] = (ys[row] + ys[row + 1]) / 2;
+            regionCells[row][column] = isInsideIntegralRegion(region, scope);
+          }
+        }
+        const volumes = {
+          positive: {x:[], y:[], z:[], i:[], j:[], k:[]},
+          negative: {x:[], y:[], z:[], i:[], j:[], k:[]}
+        };
+        function addTriangle(mesh, a, b, c) {
+          mesh.i.push(a); mesh.j.push(b); mesh.k.push(c);
+        }
+        function addWall(mesh, vertices, a, b) {
+          const bottomA = vertices + a, bottomB = vertices + b;
+          const topA = bottomA + 4, topB = bottomB + 4;
+          addTriangle(mesh, bottomA, bottomB, topB);
+          addTriangle(mesh, bottomA, topB, topA);
+        }
+        for (let row = 0; row < ys.length - 1; row++) {
+          for (let column = 0; column < xs.length - 1; column++) {
+            if (!regionCells[row][column]) continue;
+            const corners = [
+              [xs[column], ys[row]],
+              [xs[column + 1], ys[row]],
+              [xs[column + 1], ys[row + 1]],
+              [xs[column], ys[row + 1]]
+            ];
+            const top = corners.map(([x,y]) => {
+              const value = safeValue(parsed.node, {[nameX]:x,[nameY]:y});
+              return value === null ? null : value;
+            });
+            if (top.some(value => value === null)) continue;
+            const averageHeight = top.reduce((sum,value) => sum + value,0) / top.length;
+            const mesh = averageHeight >= 0 ? volumes.positive : volumes.negative;
+            const offset = mesh.x.length;
+            for (const [x,y] of corners) { mesh.x.push(x); mesh.y.push(y); mesh.z.push(0); }
+            for (let index = 0; index < corners.length; index++) {
+              mesh.x.push(corners[index][0]);
+              mesh.y.push(corners[index][1]);
+              mesh.z.push(top[index]);
+            }
+            addTriangle(mesh,offset+4,offset+5,offset+6);
+            addTriangle(mesh,offset+4,offset+6,offset+7);
+            addTriangle(mesh,offset,offset+2,offset+1);
+            addTriangle(mesh,offset,offset+3,offset+2);
+            if (row === 0 || !regionCells[row-1][column]) addWall(mesh,offset,0,1);
+            if (row === regionCells.length-1 || !regionCells[row+1][column]) addWall(mesh,offset,3,2);
+            if (column === 0 || !regionCells[row][column-1]) addWall(mesh,offset,0,3);
+            if (column === regionCells[row].length-1 || !regionCells[row][column+1]) addWall(mesh,offset,1,2);
+          }
+        }
+        if (!volumes.positive.i.length && !volumes.negative.i.length) throw new Error('无法为该区域生成体积图；请检查函数奇点或缩小网格范围');
         return {
           data:[
-            {type:'surface', name:'被积函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis', showscale:true},
-            {type:'surface', name:'有效积分区域', x:xs, y:ys, z:raisedRegion, colorscale:[[0,'#e85d36'],[1,'#e85d36']], cmin:0, cmax:1, showscale:false, opacity:.72, hoverinfo:'skip'}
+            {type:'surface', name:'被积函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis', showscale:true, opacity:.72},
+            ...(volumes.positive.i.length ? [{type:'mesh3d',name:'z=0 上方的体积',x:volumes.positive.x,y:volumes.positive.y,z:volumes.positive.z,i:volumes.positive.i,j:volumes.positive.j,k:volumes.positive.k,color:'#e85d36',opacity:.48,flatshading:true,hoverinfo:'skip'}] : []),
+            ...(volumes.negative.i.length ? [{type:'mesh3d',name:'z=0 下方的体积（负贡献）',x:volumes.negative.x,y:volumes.negative.y,z:volumes.negative.z,i:volumes.negative.i,j:volumes.negative.j,k:volumes.negative.k,color:'#3578bd',opacity:.48,flatshading:true,hoverinfo:'skip'}] : [])
           ],
           layout:{title:'被积函数曲面与有效积分区域', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'f('+nameX+','+nameY+')'}}, template:'plotly_white', height:720, showlegend:true}
         };
@@ -429,7 +481,7 @@
       note.textContent = result.parsed.variables.length === 1
         ? '橙色阴影表示积分区间内曲线与横轴之间的有符号面积。'
         : result.parsed.variables.length === 2
-          ? '曲面上的橙色点标出满足积分区域条件的采样位置。'
+          ? '半透明立体填充表示曲面与 z=0 平面之间的体积；橙色为正贡献，蓝色为负贡献，积分结果按正负相抵。'
           : '浅色点表示完整积分范围，橙色点标出满足积分区域条件的采样位置。';
       panel.append(note);
       Plotly.react('plot', result.plot.data, result.plot.layout, {responsive:true});
