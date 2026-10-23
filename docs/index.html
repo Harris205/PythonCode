@@ -19,7 +19,9 @@
     label { display:grid; gap:7px; font-weight:700; }
     input { width:100%; border:1px solid #b9b5a9; border-radius:5px; background:#fff; padding:12px 13px; color:var(--ink); font:15px "Consolas","Courier New",monospace; }
     input:focus { outline:3px solid rgba(232,93,54,.16); border-color:var(--accent); }
+    select { width:100%; border:1px solid #b9b5a9; border-radius:5px; background:#fff; padding:12px 13px; color:var(--ink); font:15px "Segoe UI",sans-serif; }
     button { border:0; border-radius:5px; padding:13px 18px; color:#fff; background:var(--accent); font-weight:800; cursor:pointer; }
+    button.secondary { padding:9px 12px; color:var(--green); background:#e7efe8; }
     .hint { color:#67665f; font-size:12px; line-height:1.5; }
     #error { display:none; border-left:4px solid #c83f36; padding:12px; background:#fff0ed; }
     #suggestion { display:none; gap:8px; }
@@ -37,13 +39,20 @@
   <main>
     <aside class="panel">
       <form id="plot-form">
+        <label>绘图类型
+          <select id="plot-mode">
+            <option value="cartesian">直角坐标（曲线 / 曲面 / 点云）</option>
+            <option value="polar">极坐标曲线 r = f(θ)</option>
+          </select>
+        </label>
         <label>数学表达式
           <input id="expression" value="sin(x) + cos(y)" spellcheck="false">
         </label>
         <label>定义域
           <input id="domain" value="x=-5,5; y=-5,5" spellcheck="false">
         </label>
-        <div class="hint">支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。</div>
+        <div class="hint" id="input-hint">支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。</div>
+        <button class="secondary" id="polar-example" type="button" hidden>载入极坐标心形线示例</button>
         <button type="submit">绘制图像</button>
         <div id="status"></div>
         <div id="error"></div>
@@ -59,6 +68,9 @@
     const errorBox = document.querySelector('#error');
     const suggestion = document.querySelector('#suggestion');
     const fixedCode = document.querySelector('#fixed');
+    const plotMode = document.querySelector('#plot-mode');
+    const inputHint = document.querySelector('#input-hint');
+    const polarExample = document.querySelector('#polar-example');
 
     function normalizeText(text) {
       let value = text.trim().replace(/\s*\^\s*/g, '^').replace(/\*\*/g, '^');
@@ -71,13 +83,18 @@
     }
 
     function parseDomain(text, variables) {
-      const pieces = text.match(/[A-Za-z_]\w*\s*(?:=|in)\s*\[?\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*,\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*\]?/g) || [];
+      const pieces = text.split(/[;；]/).map(piece => piece.trim()).filter(Boolean);
       if (pieces.length !== variables.length) throw new Error(`需要为 ${variables.length} 个变量分别输入区间`);
       const domains = {};
       for (const piece of pieces) {
-        const match = piece.match(/^\s*([A-Za-z_]\w*)\s*(?:=|in)\s*\[?\s*([^,]+?)\s*,\s*(.+?)\s*\]?$/);
-        if (!match) throw new Error('区间格式应为 x=-10,10 或 x in [-10,10]');
-        const endpoint = value => math.evaluate(value.replace(/\bpi\b/g, String(Math.PI)).replace(/\b-e\b/g, String(-Math.E)).replace(/\be\b/g, String(Math.E)));
+        const match = piece.match(/^\s*([A-Za-z_]\w*)\s*(?:=|in)\s*\[?\s*([^,]+?)\s*,\s*([^\]]+?)\s*\]?\s*$/);
+        if (!match) throw new Error('区间格式应为 x=-10,10 或 x in [-pi,pi]');
+        const endpoint = value => {
+          const node = math.parse(value.trim());
+          const symbols = node.filter(item => item.isSymbolNode).map(item => item.name);
+          if (symbols.some(name => name !== 'pi' && name !== 'e')) throw new Error('区间端点只允许数字、pi 和 e');
+          return math.evaluate(value.trim());
+        };
         const lower = endpoint(match[2]);
         const upper = endpoint(match[3]);
         if (!Number.isFinite(lower) || !Number.isFinite(upper)) throw new Error('区间端点必须是有限数字');
@@ -118,7 +135,39 @@
       } catch (_) { return null; }
     }
 
+    function buildPolarPlot(expression, domain) {
+      const parsed = parseExpression(expression);
+      if (parsed.variables.length !== 1) throw new Error('极坐标表达式只能包含一个变量，请使用 r=1+cos(theta) 这类形式');
+      const variable = parsed.variables[0];
+      const domains = parseDomain(domain, parsed.variables);
+      const angles = linspace(domains[variable], 1200);
+      const radii = [];
+      const degrees = [];
+      for (const angle of angles) {
+        const radius = safeValue(parsed.node, { [variable]: angle });
+        if (radius === null) {
+          radii.push(null);
+          degrees.push(angle * 180 / Math.PI);
+          continue;
+        }
+        const adjusted = radius < 0 ? angle + Math.PI : angle;
+        radii.push(Math.abs(radius));
+        degrees.push(adjusted * 180 / Math.PI);
+      }
+      if (!radii.some(radius => radius !== null)) throw new Error('定义域内没有有限的极径值');
+      return {
+        data:[{type:'scatterpolar', mode:'lines', r:radii, theta:degrees, line:{color:'#e85d36',width:2.5}, connectgaps:false}],
+        layout:{
+          title:`Polar curve: r = ${parsed.normalized}`,
+          polar:{angularaxis:{direction:'counterclockwise',rotation:0},radialaxis:{title:'r',rangemode:'tozero'}},
+          template:'plotly_white',
+          height:720
+        }
+      };
+    }
+
     function buildPlot(expression, domain) {
+      if (plotMode.value === 'polar') return buildPolarPlot(expression, domain);
       const parsed = parseExpression(expression);
       const domains = parseDomain(domain, parsed.variables);
       const scope = {};
@@ -171,6 +220,23 @@
 
     document.querySelector('#plot-form').addEventListener('submit', event => { event.preventDefault(); draw(); });
     fixedCode.addEventListener('click', () => { expressionInput.value = fixedCode.textContent; draw(); });
+    plotMode.addEventListener('change', () => {
+      const polar = plotMode.value === 'polar';
+      polarExample.hidden = !polar;
+      if (polar && expressionInput.value.trim() === 'sin(x) + cos(y)' && domainInput.value.trim() === 'x=-5,5; y=-5,5') {
+        expressionInput.value = '1+cos(theta)';
+        domainInput.value = 'theta=0,2*pi';
+      }
+      inputHint.textContent = polar
+        ? '极坐标输入 r=f(θ)：表达式使用 theta 变量，定义域例如 theta=0,2*pi。支持 2*pi、-pi 和 e 等常量。'
+        : '支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。';
+      draw();
+    });
+    polarExample.addEventListener('click', () => {
+      expressionInput.value = '1+cos(theta)';
+      domainInput.value = 'theta=0,2*pi';
+      draw();
+    });
     draw();
   </script>
 </body>
