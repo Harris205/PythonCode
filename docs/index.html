@@ -29,6 +29,11 @@
     #suggestion { display:none; gap:8px; }
     #suggestion code { display:block; background:#f2efe4; padding:8px; overflow-wrap:anywhere; }
     #plot { min-height:640px; overflow:hidden; }
+    .visualization { min-width:0; display:grid; align-content:start; gap:14px; }
+    #integral-results { padding:20px 24px; line-height:1.6; }
+    #integral-results h2 { margin-top:0; }
+    #integral-results p { margin:.45rem 0; }
+    #integral-results[hidden] { display:none !important; }
     #status { min-height:18px; color:#67665f; font-size:13px; }
     @media(max-width:850px) { header { align-items:flex-start; } main { grid-template-columns:1fr; } #plot { min-height:520px; } }
   </style>
@@ -74,7 +79,10 @@
         <div id="suggestion"><strong>可直接粘贴的修正</strong><code id="fixed"></code></div>
       </form>
     </aside>
-    <section id="plot" class="panel"></section>
+    <div class="visualization">
+      <section id="plot" class="panel"></section>
+      <section id="integral-results" class="panel" hidden aria-live="polite"></section>
+    </div>
   </main>
   <script>
     const expressionInput = document.querySelector('#expression');
@@ -202,11 +210,7 @@
             sampleDimension(index + 1);
             continue;
           }
-          if (condition) {
-            const inside = condition.evaluate(scope);
-            if (typeof inside !== 'boolean') throw new Error('积分区域条件必须是布尔不等式，例如 x^2+y^2<=1');
-            if (!inside) continue;
-          }
+          if (!isInsideIntegralRegion(condition, scope)) continue;
           const value = integrand.evaluate(scope);
           if (typeof value !== 'number' || !Number.isFinite(value)) {
             throw new Error('积分区域内遇到无定义或非有限函数值；请检查奇点或缩小积分区域');
@@ -219,6 +223,13 @@
       return sum * cellVolume;
     }
 
+    function isInsideIntegralRegion(condition, scope) {
+      if (!condition) return true;
+      const inside = condition.evaluate(scope);
+      if (typeof inside !== 'boolean') throw new Error('积分区域条件必须是布尔不等式，例如 x^2+y^2<=1');
+      return inside;
+    }
+
     function numericIntegral(parsed, bounds, condition) {
       const integrand = parsed.node.compile();
       const resolutions = parsed.variables.length === 1
@@ -229,6 +240,98 @@
       const coarse = midpointIntegral(integrand, condition, parsed.variables, bounds, resolutions[0]);
       const fine = midpointIntegral(integrand, condition, parsed.variables, bounds, resolutions[1]);
       return { value:fine, estimatedError:Math.abs(fine - coarse), resolution:resolutions[1] };
+    }
+
+    function buildIntegralPlot(parsed, bounds, condition) {
+      const variables = parsed.variables;
+      const integrand = parsed.node.compile();
+      const fillColor = 'rgba(232,93,54,0.42)';
+      const scope = {};
+
+      if (variables.length === 1) {
+        const variable = variables[0];
+        const xs = linspace(bounds[variable], 1000);
+        const values = [];
+        const shaded = [];
+        for (const x of xs) {
+          scope[variable] = x;
+          const value = safeValue(parsed.node, scope);
+          const inside = isInsideIntegralRegion(condition, scope);
+          values.push(value);
+          shaded.push(inside ? value : null);
+        }
+        return {
+          data:[
+            {type:'scatter', mode:'lines', name:'被积函数', x:xs, y:values, line:{color:'#237a57',width:2}},
+            {type:'scatter', mode:'lines', name:'有效积分区域', x:xs, y:shaded, line:{color:'#e85d36',width:1}, fill:'tozeroy', fillcolor:fillColor, connectgaps:false}
+          ],
+          layout:{title:'被积函数与有效积分区间', xaxis:{title:variable}, yaxis:{title:'f('+variable+')'}, template:'plotly_white', height:640, showlegend:true}
+        };
+      }
+
+      if (variables.length === 2) {
+        const [nameX, nameY] = variables;
+        const resolution = 90;
+        const xs = linspace(bounds[nameX], resolution);
+        const ys = linspace(bounds[nameY], resolution);
+        const zMatrix = [];
+        const highlightedZ = [];
+        let minZ = Infinity, maxZ = -Infinity;
+        for (const y of ys) {
+          const row = [], highlightedRow = [];
+          for (const x of xs) {
+            scope[nameX] = x;
+            scope[nameY] = y;
+            const value = safeValue(parsed.node, scope);
+            row.push(value);
+            highlightedRow.push(null);
+            if (value !== null) {
+              minZ = Math.min(minZ, value);
+              maxZ = Math.max(maxZ, value);
+              if (isInsideIntegralRegion(condition, scope)) highlightedRow[highlightedRow.length - 1] = value;
+            }
+          }
+          zMatrix.push(row);
+          highlightedZ.push(highlightedRow);
+        }
+        if (!highlightedZ.some(row => row.some(value => value !== null))) throw new Error('当前积分区域内没有可显示的有效点');
+        const offset = Number.isFinite(minZ) && Number.isFinite(maxZ)
+          ? Math.max((maxZ - minZ) * 0.006, Math.max(Math.abs(minZ), 1) * 0.006)
+          : 0.006;
+        const raisedRegion = highlightedZ.map(row => row.map(value => value === null ? null : value + offset));
+        return {
+          data:[
+            {type:'surface', name:'被积函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis', showscale:true},
+            {type:'surface', name:'有效积分区域', x:xs, y:ys, z:raisedRegion, colorscale:[[0,'#e85d36'],[1,'#e85d36']], cmin:0, cmax:1, showscale:false, opacity:.72, hoverinfo:'skip'}
+          ],
+          layout:{title:'被积函数曲面与有效积分区域', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'f('+nameX+','+nameY+')'}}, template:'plotly_white', height:720, showlegend:true}
+        };
+      }
+
+      const [nameX, nameY, nameZ] = variables;
+      const resolution = 26;
+      const coordinates = { x:[], y:[], z:[], value:[] };
+      const valid = { x:[], y:[], z:[], value:[] };
+      const axes = [nameX,nameY,nameZ].map(name => linspace(bounds[name],resolution));
+      for (const z of axes[2]) for (const y of axes[1]) for (const x of axes[0]) {
+        scope[nameX] = x;
+        scope[nameY] = y;
+        scope[nameZ] = z;
+        const value = safeValue(parsed.node, scope);
+        if (value === null) continue;
+        coordinates.x.push(x); coordinates.y.push(y); coordinates.z.push(z); coordinates.value.push(value);
+        if (isInsideIntegralRegion(condition, scope)) {
+          valid.x.push(x); valid.y.push(y); valid.z.push(z); valid.value.push(value);
+        }
+      }
+      if (!valid.x.length) throw new Error('当前积分区域内没有可显示的有效点');
+      return {
+        data:[
+          {type:'scatter3d', mode:'markers', name:'积分范围', x:coordinates.x, y:coordinates.y, z:coordinates.z, marker:{size:2.2,color:coordinates.value,colorscale:'Portland',opacity:.16}, hoverinfo:'skip'},
+          {type:'scatter3d', mode:'markers', name:'有效积分区域', x:valid.x, y:valid.y, z:valid.z, marker:{size:4,color:'#e85d36',opacity:.9}, customdata:valid.value, hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>有效积分区域</extra>`}
+        ],
+        layout:{title:'三维积分区域（橙色为有效区域）', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true}
+      };
     }
 
     function symbolicIntegral(parsed, bounds) {
@@ -267,14 +370,14 @@
           symbolicMessage = `符号积分暂不可用：${error.message || String(error)}`;
         }
       }
-      return { parsed:integral, bounds, conditionText:conditionText.trim(), numeric, symbolic, symbolicMessage };
+      const plot = buildIntegralPlot(integral, bounds, condition);
+      return { parsed:integral, bounds, conditionText:conditionText.trim(), numeric, symbolic, symbolicMessage, plot };
     }
 
     function renderIntegralResult(result) {
-      Plotly.purge('plot');
-      const panel = document.querySelector('#plot');
+      const panel = document.querySelector('#integral-results');
       panel.replaceChildren();
-      panel.style.padding = 'clamp(22px,4vw,48px)';
+      panel.hidden = false;
       const title = document.createElement('h2');
       title.textContent = `${result.parsed.variables.length} 重定积分结果`;
       const integral = document.createElement('p');
@@ -296,6 +399,15 @@
         note.textContent = result.symbolicMessage;
         panel.append(note);
       }
+      const note = document.createElement('p');
+      note.className = 'hint';
+      note.textContent = result.parsed.variables.length === 1
+        ? '橙色阴影表示积分区间内曲线与横轴之间的有符号面积。'
+        : result.parsed.variables.length === 2
+          ? '曲面上的橙色点标出满足积分区域条件的采样位置。'
+          : '浅色点表示完整积分范围，橙色点标出满足积分区域条件的采样位置。';
+      panel.append(note);
+      Plotly.react('plot', result.plot.data, result.plot.layout, {responsive:true});
     }
 
     function buildPolarPlot(expression, domain) {
@@ -367,8 +479,10 @@
       status.textContent = '正在计算采样点…';
       errorBox.style.display = 'none';
       suggestion.style.display = 'none';
+      if (plotMode.value !== 'integral') document.querySelector('#integral-results').hidden = true;
       if (plotMode.value === 'integral') {
         status.textContent = '正在计算积分；高维积分可能需要几秒钟…';
+        document.querySelector('#integral-results').hidden = true;
         setTimeout(() => {
           try {
             const result = buildIntegral(expressionInput.value, domainInput.value, regionConditionInput.value);
@@ -385,6 +499,7 @@
         return;
       }
       try {
+        document.querySelector('#integral-results').hidden = true;
         const panel = document.querySelector('#plot');
         if (panel.style.padding) {
           Plotly.purge('plot');
