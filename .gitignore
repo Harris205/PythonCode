@@ -1,0 +1,10 @@
+__pycache__/
+.deploy-check/
+*.py[cod]
+*.png
+.venv/
+venv/
+env/
+cloudflared.exe
+.env
+*.log
