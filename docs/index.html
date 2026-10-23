@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>数学表达式绘图器</title>
   <script src="https://cdn.jsdelivr.net/npm/mathjs@12.4.3/lib/browser/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/nerdamer@1.1.13/all.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
     :root { --ink:#17211b; --paper:#f4f1e8; --panel:#fffdf7; --accent:#e85d36; --green:#237a57; }
     * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
     body { margin:0; min-height:100vh; color:var(--ink); background:linear-gradient(135deg,#e8e5d8 0%,#f8f5ed 58%,#dfe9df 100%); font-family:"Segoe UI",sans-serif; }
     header { display:flex; align-items:end; justify-content:space-between; gap:1rem; padding:24px clamp(18px,4vw,56px) 18px; }
     h1 { margin:0; max-width:760px; font-family:Georgia,"Times New Roman",serif; font-size:clamp(32px,5vw,66px); line-height:.92; }
@@ -43,17 +45,30 @@
           <select id="plot-mode">
             <option value="cartesian">直角坐标（曲线 / 曲面 / 点云）</option>
             <option value="polar">极坐标曲线 r = f(θ)</option>
+            <option value="integral">定积分（一重 / 多重）</option>
           </select>
         </label>
-        <label>数学表达式
+        <label id="expression-label">数学表达式
           <input id="expression" value="sin(x) + cos(y)" spellcheck="false">
         </label>
-        <label>定义域
+        <label id="domain-label">定义域
           <input id="domain" value="x=-5,5; y=-5,5" spellcheck="false">
+        </label>
+        <label id="region-label" hidden>积分区域条件（可选）
+          <input id="region-condition" placeholder="例如 x^2+y^2<=1" spellcheck="false">
         </label>
         <div class="hint" id="input-hint">支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。</div>
         <button class="secondary" id="polar-example" type="button" hidden>载入极坐标心形线示例</button>
-        <button type="submit">绘制图像</button>
+        <label id="integral-example-label" hidden>积分示例
+          <select id="integral-example">
+            <option value="one">一重积分：∫₀¹ x² dx</option>
+            <option value="double">二重积分：∫∫(x+y) dA</option>
+            <option value="triple">三重积分：∫∫∫(x+y+z) dV</option>
+            <option value="disk">圆盘区域：x²+y²≤1 上积分 1</option>
+          </select>
+        </label>
+        <button class="secondary" id="load-integral-example" type="button" hidden>载入积分示例</button>
+        <button id="submit-button" type="submit">绘制图像</button>
         <div id="status"></div>
         <div id="error"></div>
         <div id="suggestion"><strong>可直接粘贴的修正</strong><code id="fixed"></code></div>
@@ -71,6 +86,14 @@
     const plotMode = document.querySelector('#plot-mode');
     const inputHint = document.querySelector('#input-hint');
     const polarExample = document.querySelector('#polar-example');
+    const expressionLabel = document.querySelector('#expression-label');
+    const domainLabel = document.querySelector('#domain-label');
+    const regionLabel = document.querySelector('#region-label');
+    const regionConditionInput = document.querySelector('#region-condition');
+    const integralExampleLabel = document.querySelector('#integral-example-label');
+    const integralExample = document.querySelector('#integral-example');
+    const loadIntegralExample = document.querySelector('#load-integral-example');
+    const submitButton = document.querySelector('#submit-button');
 
     function normalizeText(text) {
       let value = text.trim().replace(/\s*\^\s*/g, '^').replace(/\*\*/g, '^');
@@ -78,6 +101,7 @@
       value = value.replace(/\b(ln|log)\s+([A-Za-z_]\w*)\b/g, '$1($2)');
       value = value.replace(/\b(ln|log)([A-Za-z_]\w*)\b/g, '$1($2)');
       value = value.replace(/\b(sin|cos|tan|asin|acos|atan|exp|sqrt|abs)\s+([A-Za-z_]\w*)\b/g, '$1($2)');
+      value = value.replace(/\bln(?=\s*\()/g, 'log');
       value = value.replace(/(?<![A-Za-z0-9_])(\d+(?:\.\d+)?)\s*(?=[A-Za-z_]\w*)/g, '$1*');
       return value.replace(/\s+/g, '');
     }
@@ -106,15 +130,29 @@
       return domains;
     }
 
-    function parseExpression(text) {
+    function parseExpression(text, allowConstant = false) {
       const normalized = normalizeText(text);
       const node = math.parse(normalized);
       const functions = new Set(['sin','cos','tan','asin','acos','atan','atan2','sinh','cosh','tanh','exp','log','ln','sqrt','abs']);
       const variables = node.filter(node => node.isSymbolNode && !functions.has(node.name) && !math[node.name] && node.name !== 'e' && node.name !== 'pi').map(node => node.name);
       const unique = [...new Set(variables)].sort();
-      if (!unique.length) throw new Error('表达式中至少需要一个变量');
+      if (!unique.length && !allowConstant) throw new Error('表达式中至少需要一个变量');
       if (unique.length > 3) throw new Error('最多支持三个变量');
       return { normalized, node, variables: unique };
+    }
+
+    function parseIntegrationVariables(boundsText, expressionVariables) {
+      const pieces = boundsText.split(/[;；]/).map(piece => piece.trim()).filter(Boolean);
+      if (pieces.length < 1 || pieces.length > 3) throw new Error('积分包围盒必须包含 1 到 3 个变量的区间');
+      const variables = pieces.map(piece => {
+        const match = piece.match(/^\s*([A-Za-z_]\w*)\s*(?:=|in)\s*/);
+        if (!match) throw new Error('区间格式应为 x=0,1; y=0,1');
+        return match[1];
+      });
+      if (new Set(variables).size !== variables.length) throw new Error('积分包围盒中变量不能重复');
+      const missing = expressionVariables.filter(variable => !variables.includes(variable));
+      if (missing.length) throw new Error(`被积函数变量缺少积分范围：${missing.join(', ')}`);
+      return variables.sort();
     }
 
     function linspace([start, end], count) {
@@ -133,6 +171,131 @@
         const value = node.evaluate(scope);
         return typeof value === 'number' && Number.isFinite(value) ? value : null;
       } catch (_) { return null; }
+    }
+
+    function parseRegionCondition(text, variables) {
+      if (!text.trim()) return null;
+      const node = math.parse(text.trim().replace(/\*\*/g, '^'));
+      const constants = new Set(['e','pi','true','false']);
+      const functions = new Set(['sin','cos','tan','asin','acos','atan','atan2','sinh','cosh','tanh','exp','log','ln','sqrt','abs','min','max','floor','ceil','round','sign']);
+      const symbols = node.filter(item => item.isSymbolNode).map(item => item.name);
+      const unknown = [...new Set(symbols)].filter(name =>
+        !variables.includes(name) && !constants.has(name) && !functions.has(name)
+      );
+      if (unknown.length) throw new Error(`积分区域中存在未声明变量：${unknown.join(', ')}`);
+      return node.compile();
+    }
+
+    function midpointIntegral(integrand, condition, variables, bounds, resolution) {
+      const steps = variables.map(variable => (bounds[variable][1] - bounds[variable][0]) / resolution);
+      const cellVolume = steps.reduce((volume, step) => volume * step, 1);
+      const scope = {};
+      let sum = 0;
+
+      function sampleDimension(index) {
+        const variable = variables[index];
+        const [lower] = bounds[variable];
+        const step = steps[index];
+        for (let cell = 0; cell < resolution; cell++) {
+          scope[variable] = lower + (cell + 0.5) * step;
+          if (index + 1 < variables.length) {
+            sampleDimension(index + 1);
+            continue;
+          }
+          if (condition) {
+            const inside = condition.evaluate(scope);
+            if (typeof inside !== 'boolean') throw new Error('积分区域条件必须是布尔不等式，例如 x^2+y^2<=1');
+            if (!inside) continue;
+          }
+          const value = integrand.evaluate(scope);
+          if (typeof value !== 'number' || !Number.isFinite(value)) {
+            throw new Error('积分区域内遇到无定义或非有限函数值；请检查奇点或缩小积分区域');
+          }
+          sum += value;
+        }
+      }
+
+      sampleDimension(0);
+      return sum * cellVolume;
+    }
+
+    function numericIntegral(parsed, bounds, condition) {
+      const integrand = parsed.node.compile();
+      const resolutions = parsed.variables.length === 1
+        ? [1024, 4096]
+        : parsed.variables.length === 2
+          ? [64, 160]
+          : [20, 48];
+      const coarse = midpointIntegral(integrand, condition, parsed.variables, bounds, resolutions[0]);
+      const fine = midpointIntegral(integrand, condition, parsed.variables, bounds, resolutions[1]);
+      return { value:fine, estimatedError:Math.abs(fine - coarse), resolution:resolutions[1] };
+    }
+
+    function symbolicIntegral(parsed, bounds) {
+      if (typeof nerdamer === 'undefined' || typeof nerdamer.integrate !== 'function') {
+        throw new Error('符号积分引擎未能加载');
+      }
+      let current = parsed.normalized.replace(/\*\*/g, '^').replace(/\bln\s*\(/g, 'log(');
+      for (const variable of parsed.variables) {
+        const antiderivative = nerdamer.integrate(current, variable).toString();
+        const [lower, upper] = bounds[variable];
+        const upperValue = nerdamer(antiderivative, { [variable]: String(upper) }).evaluate().text();
+        const lowerValue = nerdamer(antiderivative, { [variable]: String(lower) }).evaluate().text();
+        current = nerdamer(`(${upperValue})-(${lowerValue})`).expand().toString();
+      }
+      const result = nerdamer(current).evaluate();
+      const value = Number(result.text());
+      if (!Number.isFinite(value)) throw new Error('符号结果未能化为有限数值');
+      return { expression:result.text(), value };
+    }
+
+    function buildIntegral(expression, boundsText, conditionText) {
+      const parsed = parseExpression(expression, true);
+      const variables = parseIntegrationVariables(boundsText, parsed.variables);
+      const bounds = parseDomain(boundsText, variables);
+      const integral = { ...parsed, variables };
+      const condition = parseRegionCondition(conditionText, variables);
+      const numeric = numericIntegral(integral, bounds, condition);
+      let symbolic = null;
+      let symbolicMessage = '';
+      if (condition) {
+        symbolicMessage = '含不等式条件的一般区域暂不进行符号积分。';
+      } else {
+        try {
+          symbolic = symbolicIntegral(integral, bounds);
+        } catch (error) {
+          symbolicMessage = `符号积分暂不可用：${error.message || String(error)}`;
+        }
+      }
+      return { parsed:integral, bounds, conditionText:conditionText.trim(), numeric, symbolic, symbolicMessage };
+    }
+
+    function renderIntegralResult(result) {
+      Plotly.purge('plot');
+      const panel = document.querySelector('#plot');
+      panel.replaceChildren();
+      panel.style.padding = 'clamp(22px,4vw,48px)';
+      const title = document.createElement('h2');
+      title.textContent = `${result.parsed.variables.length} 重定积分结果`;
+      const integral = document.createElement('p');
+      integral.textContent = `被积函数：${result.parsed.normalized}`;
+      const bounds = document.createElement('p');
+      bounds.textContent = `积分包围盒：${Object.entries(result.bounds).map(([name, range]) => `${name}=[${range[0]}, ${range[1]}]`).join('; ')}`;
+      const region = document.createElement('p');
+      region.textContent = `区域条件：${result.conditionText || '无（完整矩形/长方体包围盒）'}`;
+      const numeric = document.createElement('p');
+      numeric.textContent = `数值结果：${result.numeric.value.toPrecision(12)}（网格细化差值估计：${result.numeric.estimatedError.toPrecision(4)}；每维 ${result.numeric.resolution} 个采样单元）`;
+      panel.append(title, integral, bounds, region, numeric);
+      if (result.symbolic) {
+        const symbolic = document.createElement('p');
+        symbolic.textContent = `符号结果：${result.symbolic.expression} ≈ ${result.symbolic.value.toPrecision(12)}`;
+        panel.append(symbolic);
+      } else {
+        const note = document.createElement('p');
+        note.className = 'hint';
+        note.textContent = result.symbolicMessage;
+        panel.append(note);
+      }
     }
 
     function buildPolarPlot(expression, domain) {
@@ -204,7 +367,30 @@
       status.textContent = '正在计算采样点…';
       errorBox.style.display = 'none';
       suggestion.style.display = 'none';
+      if (plotMode.value === 'integral') {
+        status.textContent = '正在计算积分；高维积分可能需要几秒钟…';
+        setTimeout(() => {
+          try {
+            const result = buildIntegral(expressionInput.value, domainInput.value, regionConditionInput.value);
+            renderIntegralResult(result);
+            status.textContent = '积分完成';
+          } catch (error) {
+            errorBox.textContent = error.message || String(error);
+            errorBox.style.display = 'block';
+            try { parseExpression(normalizeText(expressionInput.value)); fixedCode.textContent = normalizeText(expressionInput.value); suggestion.style.display = 'grid'; }
+            catch (_) { fixedCode.textContent = ''; suggestion.style.display = 'none'; }
+            status.textContent = '';
+          }
+        }, 0);
+        return;
+      }
       try {
+        const panel = document.querySelector('#plot');
+        if (panel.style.padding) {
+          Plotly.purge('plot');
+          panel.replaceChildren();
+          panel.style.padding = '';
+        }
         const plot = buildPlot(expressionInput.value, domainInput.value);
         Plotly.react('plot', plot.data, plot.layout, {responsive:true});
         status.textContent = '绘制完成';
@@ -222,19 +408,46 @@
     fixedCode.addEventListener('click', () => { expressionInput.value = fixedCode.textContent; draw(); });
     plotMode.addEventListener('change', () => {
       const polar = plotMode.value === 'polar';
+      const integral = plotMode.value === 'integral';
       polarExample.hidden = !polar;
+      integralExampleLabel.hidden = !integral;
+      loadIntegralExample.hidden = !integral;
+      regionLabel.hidden = !integral;
+      expressionLabel.childNodes[0].textContent = integral ? '被积函数' : '数学表达式';
+      domainLabel.childNodes[0].textContent = integral ? '积分包围盒（有限范围）' : '定义域';
+      submitButton.textContent = integral ? '计算积分' : '绘制图像';
       if (polar && expressionInput.value.trim() === 'sin(x) + cos(y)' && domainInput.value.trim() === 'x=-5,5; y=-5,5') {
         expressionInput.value = '1+cos(theta)';
         domainInput.value = 'theta=0,2*pi';
       }
-      inputHint.textContent = polar
-        ? '极坐标输入 r=f(θ)：表达式使用 theta 变量，定义域例如 theta=0,2*pi。支持 2*pi、-pi 和 e 等常量。'
-        : '支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。';
+      if (integral && expressionInput.value.trim() === 'sin(x) + cos(y)' && domainInput.value.trim() === 'x=-5,5; y=-5,5') {
+        expressionInput.value = 'x^2';
+        domainInput.value = 'x=0,1';
+        regionConditionInput.value = '';
+      }
+      inputHint.textContent = integral
+        ? '所有被积变量都要在包围盒中给出有限上下限；可选区域条件用不等式过滤包围盒，例如圆盘：x=-1,1; y=-1,1，条件 x^2+y^2<=1。符号结果对不等式区域暂不支持。'
+        : polar
+          ? '极坐标输入 r=f(θ)：表达式使用 theta 变量，定义域例如 theta=0,2*pi。支持 2*pi、-pi 和 e 等常量。'
+          : '支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。';
       draw();
     });
     polarExample.addEventListener('click', () => {
       expressionInput.value = '1+cos(theta)';
       domainInput.value = 'theta=0,2*pi';
+      draw();
+    });
+    loadIntegralExample.addEventListener('click', () => {
+      const examples = {
+        one: { expression:'x^2', bounds:'x=0,1', condition:'' },
+        double: { expression:'x+y', bounds:'x=0,1; y=0,1', condition:'' },
+        triple: { expression:'x+y+z', bounds:'x=0,1; y=0,1; z=0,1', condition:'' },
+        disk: { expression:'1', bounds:'x=-1,1; y=-1,1', condition:'x^2+y^2<=1' }
+      };
+      const example = examples[integralExample.value];
+      expressionInput.value = example.expression;
+      domainInput.value = example.bounds;
+      regionConditionInput.value = example.condition;
       draw();
     });
     draw();
