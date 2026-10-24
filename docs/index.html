@@ -34,6 +34,7 @@
     #integral-results h2 { margin-top:0; }
     #integral-results p { margin:.45rem 0; }
     #integral-results[hidden] { display:none !important; }
+    #point-input { min-height:62px; resize:vertical; font:inherit; }
     #status { min-height:18px; color:#67665f; font-size:13px; }
     @media(max-width:850px) { header { align-items:flex-start; } main { grid-template-columns:1fr; } #plot { min-height:520px; } }
   </style>
@@ -58,6 +59,9 @@
         </label>
         <label id="domain-label">定义域
           <input id="domain" value="x=-5,5; y=-5,5" spellcheck="false">
+        </label>
+        <label id="point-label">指定取值点（可选）
+          <textarea id="point-input" placeholder="每行一个点，例如：&#10;x=1; y=2&#10;x=0; y=-1" spellcheck="false"></textarea>
         </label>
         <label id="region-label" hidden>积分定义域 / 区域（可选）
           <input id="region-condition" placeholder="例如 x=-40,60 或 x^2+y^2<=1" spellcheck="false">
@@ -96,6 +100,7 @@
     const polarExample = document.querySelector('#polar-example');
     const expressionLabel = document.querySelector('#expression-label');
     const domainLabel = document.querySelector('#domain-label');
+    const pointInput = document.querySelector('#point-input');
     const regionLabel = document.querySelector('#region-label');
     const regionConditionInput = document.querySelector('#region-condition');
     const integralExampleLabel = document.querySelector('#integral-example-label');
@@ -181,6 +186,66 @@
       } catch (_) { return null; }
     }
 
+    function parseQueryPoints(text, variables, domains) {
+      if (!text.trim()) return [];
+      const entries = text.split(/\r?\n|\|/).map(entry => entry.trim()).filter(Boolean);
+      return entries.map((entry, index) => {
+        const values = {};
+        for (const assignment of entry.split(/[;；]/).map(piece => piece.trim()).filter(Boolean)) {
+          const match = assignment.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+          if (!match) throw new Error(`第 ${index + 1} 个取值点格式错误，应为 x=1; y=2`);
+          const [, name, rawValue] = match;
+          if (!variables.includes(name)) throw new Error(`取值点中存在未知变量：${name}`);
+          if (Object.prototype.hasOwnProperty.call(values, name)) throw new Error(`第 ${index + 1} 个取值点重复指定变量：${name}`);
+          const node = math.parse(rawValue.trim());
+          const symbols = node.filter(item => item.isSymbolNode).map(item => item.name);
+          if (symbols.some(name => name !== 'pi' && name !== 'e')) throw new Error(`第 ${index + 1} 个取值点只能使用数字、pi 和 e`);
+          const value = math.evaluate(rawValue.trim());
+          if (!Number.isFinite(value)) throw new Error(`第 ${index + 1} 个取值点必须是有限数字`);
+          values[name] = value;
+        }
+        const missing = variables.filter(variable => !Object.prototype.hasOwnProperty.call(values, variable));
+        if (missing.length) throw new Error(`第 ${index + 1} 个取值点缺少变量：${missing.join(', ')}`);
+        for (const variable of variables) {
+          const [lower, upper] = domains[variable];
+          if (values[variable] < lower || values[variable] > upper) {
+            throw new Error(`第 ${index + 1} 个取值点超出 ${variable} 的定义域`);
+          }
+        }
+        return values;
+      });
+    }
+
+    function buildReferencePlanes(ranges, names) {
+      if (names.length !== 3) return [];
+      const [nameX, nameY, nameZ] = names;
+      const spansZero = range => range[0] <= 0 && range[1] >= 0;
+      const planes = [];
+      const addPlane = (name, color, x, y, z) => planes.push({
+        type:'mesh3d', name, x, y, z, i:[0,0], j:[1,2], k:[2,3],
+        color, opacity:.14, hoverinfo:'skip', showlegend:true
+      });
+      if (spansZero(ranges[nameX]) && spansZero(ranges[nameY])) {
+        addPlane('XY 平面（z=0）', '#e85d36',
+          [ranges[nameX][0], ranges[nameX][1], ranges[nameX][1], ranges[nameX][0]],
+          [ranges[nameY][0], ranges[nameY][0], ranges[nameY][1], ranges[nameY][1]],
+          [0,0,0,0]);
+      }
+      if (spansZero(ranges[nameX]) && spansZero(ranges[nameZ])) {
+        addPlane('XZ 平面（y=0）', '#3578bd',
+          [ranges[nameX][0], ranges[nameX][1], ranges[nameX][1], ranges[nameX][0]],
+          [0,0,0,0],
+          [ranges[nameZ][0], ranges[nameZ][0], ranges[nameZ][1], ranges[nameZ][1]]);
+      }
+      if (spansZero(ranges[nameY]) && spansZero(ranges[nameZ])) {
+        addPlane('YZ 平面（x=0）', '#7b4ab5',
+          [0,0,0,0],
+          [ranges[nameY][0], ranges[nameY][1], ranges[nameY][1], ranges[nameY][0]],
+          [ranges[nameZ][0], ranges[nameZ][0], ranges[nameZ][1], ranges[nameZ][1]]);
+      }
+      return planes;
+    }
+
     function parseRegionCondition(text, variables) {
       if (!text.trim()) return null;
       const node = math.parse(text.trim().replace(/\*\*/g, '^'));
@@ -254,7 +319,7 @@
       return expanded;
     }
 
-    function buildIntegralPlot(parsed, bounds, region) {
+    function buildIntegralPlot(parsed, bounds, region, queryPoints = []) {
       const variables = parsed.variables;
       const integrand = parsed.node.compile();
       const fillColor = 'rgba(232,93,54,0.42)';
@@ -272,10 +337,17 @@
           values.push(value);
           shaded.push(inside ? value : null);
         }
+        const pointTrace = queryPoints.length ? {
+          type:'scatter', mode:'markers+text', name:'指定取值点',
+          x:queryPoints.map(point => point[variable]), y:queryPoints.map(point => safeValue(parsed.node, point)),
+          text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+          textposition:'top center', marker:{color:'#111111',size:9}
+        } : null;
         return {
           data:[
             {type:'scatter', mode:'lines', name:'被积函数', x:xs, y:values, line:{color:'#237a57',width:2}},
-            {type:'scatter', mode:'lines', name:'有效积分区域', x:xs, y:shaded, line:{color:'#e85d36',width:1}, fill:'tozeroy', fillcolor:fillColor, connectgaps:false}
+            {type:'scatter', mode:'lines', name:'有效积分区域', x:xs, y:shaded, line:{color:'#e85d36',width:1}, fill:'tozeroy', fillcolor:fillColor, connectgaps:false},
+            ...(pointTrace ? [pointTrace] : [])
           ],
           layout:{title:'被积函数与有效积分区间', xaxis:{title:variable}, yaxis:{title:'f('+variable+')'}, template:'plotly_white', height:640, showlegend:true}
         };
@@ -362,11 +434,21 @@
           }
         }
         if (!volumes.positive.i.length && !volumes.negative.i.length) throw new Error('无法为该区域生成体积图；请检查函数奇点或缩小网格范围');
+        const pointTrace = queryPoints.length ? {
+          type:'scatter3d', mode:'markers+text', name:'指定取值点',
+          x:queryPoints.map(point => point[nameX]), y:queryPoints.map(point => point[nameY]),
+          z:queryPoints.map(point => safeValue(parsed.node, point)),
+          text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+          textposition:'top center', marker:{color:'#111111',size:6}
+        } : null;
+        const ranges = { [nameX]:bounds[nameX], [nameY]:bounds[nameY], z:[minZ, maxZ] };
         return {
           data:[
             {type:'surface', name:'被积函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis', showscale:true, opacity:.72},
             ...(volumes.positive.i.length ? [{type:'mesh3d',name:'z=0 上方的体积',x:volumes.positive.x,y:volumes.positive.y,z:volumes.positive.z,i:volumes.positive.i,j:volumes.positive.j,k:volumes.positive.k,color:'#e85d36',opacity:.48,flatshading:true,hoverinfo:'skip'}] : []),
-            ...(volumes.negative.i.length ? [{type:'mesh3d',name:'z=0 下方的体积（负贡献）',x:volumes.negative.x,y:volumes.negative.y,z:volumes.negative.z,i:volumes.negative.i,j:volumes.negative.j,k:volumes.negative.k,color:'#3578bd',opacity:.48,flatshading:true,hoverinfo:'skip'}] : [])
+            ...(volumes.negative.i.length ? [{type:'mesh3d',name:'z=0 下方的体积（负贡献）',x:volumes.negative.x,y:volumes.negative.y,z:volumes.negative.z,i:volumes.negative.i,j:volumes.negative.j,k:volumes.negative.k,color:'#3578bd',opacity:.48,flatshading:true,hoverinfo:'skip'}] : []),
+            ...buildReferencePlanes(ranges, [nameX,nameY,'z']),
+            ...(pointTrace ? [pointTrace] : [])
           ],
           layout:{title:'被积函数曲面与有效积分区域', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'f('+nameX+','+nameY+')'}}, template:'plotly_white', height:720, showlegend:true}
         };
@@ -389,10 +471,20 @@
         }
       }
       if (!valid.x.length) throw new Error('当前积分区域内没有可显示的有效点');
+      const pointTrace = queryPoints.length ? {
+        type:'scatter3d', mode:'markers+text', name:'指定取值点',
+        x:queryPoints.map(point => point[nameX]), y:queryPoints.map(point => point[nameY]), z:queryPoints.map(point => point[nameZ]),
+        text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+        textposition:'top center', marker:{color:'#111111',size:7},
+        customdata:queryPoints.map(point => safeValue(parsed.node, point)),
+        hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>指定取值点</extra>`
+      } : null;
       return {
         data:[
           {type:'scatter3d', mode:'markers', name:'积分范围', x:coordinates.x, y:coordinates.y, z:coordinates.z, marker:{size:2.2,color:coordinates.value,colorscale:'Portland',opacity:.16}, hoverinfo:'skip'},
-          {type:'scatter3d', mode:'markers', name:'有效积分区域', x:valid.x, y:valid.y, z:valid.z, marker:{size:4,color:'#e85d36',opacity:.9}, customdata:valid.value, hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>有效积分区域</extra>`}
+          {type:'scatter3d', mode:'markers', name:'有效积分区域', x:valid.x, y:valid.y, z:valid.z, marker:{size:4,color:'#e85d36',opacity:.9}, customdata:valid.value, hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>有效积分区域</extra>`},
+          ...buildReferencePlanes(bounds, [nameX,nameY,nameZ]),
+          ...(pointTrace ? [pointTrace] : [])
         ],
         layout:{title:'三维积分区域（橙色为有效区域）', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true}
       };
@@ -416,7 +508,7 @@
       return { expression:result.text(), value };
     }
 
-    function buildIntegral(expression, boundsText, conditionText) {
+    function buildIntegral(expression, boundsText, conditionText, pointText) {
       const parsed = parseExpression(expression, true);
       const variables = parseIntegrationVariables(boundsText, parsed.variables);
       const boxBounds = parseDomain(boundsText, variables);
@@ -434,6 +526,10 @@
       }
       const integral = { ...parsed, variables };
       const region = { bounds:integralBounds, condition };
+      const queryPoints = parseQueryPoints(pointText, variables, integralBounds);
+      if (queryPoints.some(point => safeValue(integral.node, point) === null)) {
+        throw new Error('指定取值点处函数无定义或不是有限数值');
+      }
       const numeric = numericIntegral(integral, integralBounds, region);
       let symbolic = null;
       let symbolicMessage = '';
@@ -447,7 +543,7 @@
         }
       }
       const plotBounds = expandPlotBounds(boxBounds, integralBounds);
-      const plot = buildIntegralPlot(integral, plotBounds, region);
+      const plot = buildIntegralPlot(integral, plotBounds, region, queryPoints);
       return { parsed:integral, bounds:integralBounds, conditionText:regionText, numeric, symbolic, symbolicMessage, plot };
     }
 
@@ -487,11 +583,13 @@
       Plotly.react('plot', result.plot.data, result.plot.layout, {responsive:true});
     }
 
-    function buildPolarPlot(expression, domain) {
+    function buildPolarPlot(expression, domain, pointText) {
       const parsed = parseExpression(expression);
       if (parsed.variables.length !== 1) throw new Error('极坐标表达式只能包含一个变量，请使用 r=1+cos(theta) 这类形式');
       const variable = parsed.variables[0];
       const domains = parseDomain(domain, parsed.variables);
+      const points = parseQueryPoints(pointText, parsed.variables, domains);
+      if (points.some(point => safeValue(parsed.node, point) === null)) throw new Error('指定取值点处函数无定义或不是有限数值');
       const angles = linspace(domains[variable], 1200);
       const radii = [];
       const degrees = [];
@@ -507,8 +605,18 @@
         degrees.push(adjusted * 180 / Math.PI);
       }
       if (!radii.some(radius => radius !== null)) throw new Error('定义域内没有有限的极径值');
+      const pointTrace = points.length ? {
+        type:'scatterpolar', mode:'markers', name:'指定取值点',
+        r:points.map(point => Math.abs(safeValue(parsed.node, point))),
+        theta:points.map(point => {
+          const radius = safeValue(parsed.node, point);
+          return (radius < 0 ? point[variable] + Math.PI : point[variable]) * 180 / Math.PI;
+        }),
+        marker:{color:'#111111',size:10}, customdata:points.map(point => [point[variable], safeValue(parsed.node, point)]),
+        hovertemplate:'theta=%{customdata[0]:.6g}<br>r=%{customdata[1]:.6g}<extra>指定取值点</extra>'
+      } : null;
       return {
-        data:[{type:'scatterpolar', mode:'lines', r:radii, theta:degrees, line:{color:'#e85d36',width:2.5}, connectgaps:false}],
+        data:[{type:'scatterpolar', mode:'lines', name:'极坐标曲线', r:radii, theta:degrees, line:{color:'#e85d36',width:2.5}, connectgaps:false}, ...(pointTrace ? [pointTrace] : [])],
         layout:{
           title:`Polar curve: r = ${parsed.normalized}`,
           polar:{angularaxis:{direction:'counterclockwise',rotation:0},radialaxis:{title:'r',rangemode:'tozero'}},
@@ -518,17 +626,26 @@
       };
     }
 
-    function buildPlot(expression, domain) {
-      if (plotMode.value === 'polar') return buildPolarPlot(expression, domain);
+    function buildPlot(expression, domain, pointText) {
+      if (plotMode.value === 'polar') return buildPolarPlot(expression, domain, pointText);
       const parsed = parseExpression(expression);
       const domains = parseDomain(domain, parsed.variables);
+      const points = parseQueryPoints(pointText, parsed.variables, domains);
+      if (points.some(point => safeValue(parsed.node, point) === null)) throw new Error('指定取值点处函数无定义或不是有限数值');
       const scope = {};
 
       if (parsed.variables.length === 1) {
         const name = parsed.variables[0];
         const xs = linspace(domains[name], 1000);
         const values = xs.map(x => safeValue(parsed.node, { [name]: x }));
-        return { data:[{type:'scatter', mode:'lines', x:xs, y:values}], layout:{title:'Curve', xaxis:{title:name}, yaxis:{title:'function value'}, template:'plotly_white', height:640} };
+        const pointTrace = points.length ? {
+          type:'scatter', mode:'markers+text', name:'指定取值点',
+          x:points.map(point => point[name]), y:points.map(point => safeValue(parsed.node, point)),
+          text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+          textposition:'top center', marker:{color:'#111111',size:10},
+          hovertemplate:`${name}=%{x:.6g}<br>f=%{y:.6g}<extra>指定取值点</extra>`
+        } : null;
+        return { data:[{type:'scatter', mode:'lines', name:'函数曲线', x:xs, y:values}, ...(pointTrace ? [pointTrace] : [])], layout:{title:'Curve', xaxis:{title:name}, yaxis:{title:'function value'}, template:'plotly_white', height:640} };
       }
 
       if (parsed.variables.length === 2) {
@@ -538,18 +655,38 @@
         const z = grid.x.map((x, index) => safeValue(parsed.node, { [nameX]: x, [nameY]: grid.y[index] }));
         const zMatrix = [];
         for (let row = 0; row < ys.length; row++) zMatrix.push(z.slice(row * xs.length, (row + 1) * xs.length));
-        return { data:[{type:'surface', x:xs, y:ys, z:zMatrix, colorscale:'Viridis'}], layout:{title:'Surface', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'function value'}}, template:'plotly_white', height:720} };
+        const finiteValues = z.filter(value => value !== null);
+        const minZ = Math.min(...finiteValues), maxZ = Math.max(...finiteValues);
+        const pointTrace = points.length ? {
+          type:'scatter3d', mode:'markers+text', name:'指定取值点',
+          x:points.map(point => point[nameX]), y:points.map(point => point[nameY]),
+          z:points.map(point => safeValue(parsed.node, point)),
+          text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+          textposition:'top center', marker:{color:'#111111',size:6},
+          hovertemplate:`${nameX}=%{x:.6g}<br>${nameY}=%{y:.6g}<br>f=%{z:.6g}<extra>指定取值点</extra>`
+        } : null;
+        const ranges = { [nameX]:domains[nameX], [nameY]:domains[nameY], z:[minZ,maxZ] };
+        return { data:[{type:'surface', name:'函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis'}, ...buildReferencePlanes(ranges, [nameX,nameY,'z']), ...(pointTrace ? [pointTrace] : [])], layout:{title:'Surface', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'function value'}}, template:'plotly_white', height:720, showlegend:true} };
       }
 
       const [nameX, nameY, nameZ] = parsed.variables;
       const xs = linspace(domains[nameX], 18), ys = linspace(domains[nameY], 18), zs = linspace(domains[nameZ], 18);
-      const points = {x:[], y:[], z:[], color:[]};
+      const cloud = {x:[], y:[], z:[], color:[]};
       for (const z of zs) for (const y of ys) for (const x of xs) {
         const value = safeValue(parsed.node, { [nameX]: x, [nameY]: y, [nameZ]: z });
-        if (value !== null) { points.x.push(x); points.y.push(y); points.z.push(z); points.color.push(value); }
+        if (value !== null) { cloud.x.push(x); cloud.y.push(y); cloud.z.push(z); cloud.color.push(value); }
       }
-      if (!points.x.length) throw new Error('定义域内没有有限函数值');
-      return { data:[{type:'scatter3d', mode:'markers', x:points.x, y:points.y, z:points.z, marker:{size:2.8,color:points.color,colorscale:'Portland',opacity:.8}}], layout:{title:'3D point cloud', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720} };
+      if (!cloud.x.length) throw new Error('定义域内没有有限函数值');
+      const pointTrace = points.length ? {
+        type:'scatter3d', mode:'markers+text', name:'指定取值点',
+        x:points.map(point => point[nameX]), y:points.map(point => point[nameY]), z:points.map(point => point[nameZ]),
+        text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
+        textposition:'top center', marker:{color:'#111111',size:7},
+        customdata:points.map(point => safeValue(parsed.node, point)),
+        hovertemplate:`${nameX}=%{x:.6g}<br>${nameY}=%{y:.6g}<br>${nameZ}=%{z:.6g}<br>f=%{customdata:.6g}<extra>指定取值点</extra>`
+      } : null;
+      const ranges = { [nameX]:domains[nameX], [nameY]:domains[nameY], [nameZ]:domains[nameZ] };
+      return { data:[{type:'scatter3d', mode:'markers', name:'函数点云', x:cloud.x, y:cloud.y, z:cloud.z, marker:{size:2.8,color:cloud.color,colorscale:'Portland',opacity:.8}}, ...buildReferencePlanes(ranges, [nameX,nameY,nameZ]), ...(pointTrace ? [pointTrace] : [])], layout:{title:'3D point cloud', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true} };
     }
 
     function draw() {
@@ -562,7 +699,7 @@
         document.querySelector('#integral-results').hidden = true;
         setTimeout(() => {
           try {
-            const result = buildIntegral(expressionInput.value, domainInput.value, regionConditionInput.value);
+            const result = buildIntegral(expressionInput.value, domainInput.value, regionConditionInput.value, pointInput.value);
             renderIntegralResult(result);
             status.textContent = '积分完成';
           } catch (error) {
@@ -583,7 +720,7 @@
           panel.replaceChildren();
           panel.style.padding = '';
         }
-        const plot = buildPlot(expressionInput.value, domainInput.value);
+        const plot = buildPlot(expressionInput.value, domainInput.value, pointInput.value);
         Plotly.react('plot', plot.data, plot.layout, {responsive:true});
         status.textContent = '绘制完成';
       } catch (error) {
@@ -618,10 +755,10 @@
         regionConditionInput.value = '';
       }
       inputHint.textContent = integral
-        ? '定义域可直接写区间（如 x=-40,60），范围可超出包围盒；也可写不等式区域（如 x^2+y^2<=1）。留空则使用包围盒。一般不等式区域暂只给数值积分。'
+        ? '定义域可直接写区间（如 x=-40,60），范围可超出包围盒；也可写不等式区域（如 x^2+y^2<=1）。留空则使用包围盒。指定取值点每行一个，格式如 x=0; y=1。'
         : polar
-          ? '极坐标输入 r=f(θ)：表达式使用 theta 变量，定义域例如 theta=0,2*pi。支持 2*pi、-pi 和 e 等常量。'
-          : '支持 1–3 个变量。例：x=-5,5; y=-5,5。自然对数用 ln(x)，常数使用 e 或 pi。';
+          ? '极坐标输入 r=f(θ)：表达式使用 theta 变量，定义域例如 theta=0,2*pi。指定取值点填写 theta=pi/2，每行一个。支持 2*pi、-pi 和 e 等常量。'
+          : '支持 1–3 个变量。例：x=-5,5; y=-5,5。指定取值点每行一个，如 x=1; y=2。自然对数用 ln(x)，常数使用 e 或 pi。';
       draw();
     });
     polarExample.addEventListener('click', () => {
