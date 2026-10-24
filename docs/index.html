@@ -246,6 +246,38 @@
       return planes;
     }
 
+    function formatPointCoordinate(value) {
+      return Number(value).toPrecision(5).replace(/\.?0+$/, '');
+    }
+
+    function build3DPointLabels(points, names, coordinateFn, ranges) {
+      if (!points.length) return [];
+      const [nameX, nameY, nameZ] = names;
+      const spanX = Math.max(ranges[nameX][1] - ranges[nameX][0], 1);
+      const spanZ = Math.max(ranges[nameZ][1] - ranges[nameZ][0], 1);
+      const labelZ = ranges[nameZ][1] + spanZ * 0.16;
+      const lineX = [], lineY = [], lineZ = [];
+      const labelX = [], labelY = [], labelValues = [];
+      points.forEach((point, index) => {
+        const [x, y, z] = coordinateFn(point);
+        const offsetX = (index - (points.length - 1) / 2) * spanX * 0.06;
+        const targetX = x + offsetX;
+        lineX.push(x, targetX, null);
+        lineY.push(y, y, null);
+        lineZ.push(z, labelZ, null);
+        labelX.push(targetX);
+        labelY.push(y);
+        labelValues.push(`(${formatPointCoordinate(x)}, ${formatPointCoordinate(y)}, ${formatPointCoordinate(z)})`);
+      });
+      return [
+        {type:'scatter3d', mode:'lines', name:'取值点引线', x:lineX, y:lineY, z:lineZ,
+          line:{color:'#d62728',width:4}, hoverinfo:'skip', showlegend:false},
+        {type:'scatter3d', mode:'text', name:'取值点坐标', x:labelX, y:labelY,
+          z:labelX.map(() => labelZ), text:labelValues, textfont:{color:'#b51f24',size:12},
+          hoverinfo:'skip', showlegend:false}
+      ];
+    }
+
     function parseRegionCondition(text, variables) {
       if (!text.trim()) return null;
       const node = math.parse(text.trim().replace(/\*\*/g, '^'));
@@ -338,16 +370,28 @@
           shaded.push(inside ? value : null);
         }
         const pointTrace = queryPoints.length ? {
-          type:'scatter', mode:'markers+text', name:'指定取值点',
+          type:'scatter', mode:'markers', name:'指定取值点',
           x:queryPoints.map(point => point[variable]), y:queryPoints.map(point => safeValue(parsed.node, point)),
-          text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-          textposition:'top center', marker:{color:'#111111',size:9}
+          marker:{color:'#d62728',size:9},
+          hovertemplate:`${variable}=%{x:.6g}<br>f=%{y:.6g}<extra>指定取值点</extra>`
+        } : null;
+        const pointLabels = queryPoints.length ? {
+          type:'scatter', mode:'lines+text', name:'取值点坐标',
+          x:queryPoints.flatMap(point => [point[variable], point[variable], null]),
+          y:queryPoints.flatMap(point => {
+            const value = safeValue(parsed.node, point);
+            return [value, value + Math.max(Math.abs(value) * .16, 1), null];
+          }),
+          text:queryPoints.flatMap(point => ['', `(${formatPointCoordinate(point[variable])}, ${formatPointCoordinate(safeValue(parsed.node, point))})`, null]),
+          textposition:'top center', line:{color:'#d62728',width:2}, textfont:{color:'#b51f24',size:12},
+          hoverinfo:'skip', showlegend:false
         } : null;
         return {
           data:[
             {type:'scatter', mode:'lines', name:'被积函数', x:xs, y:values, line:{color:'#237a57',width:2}},
             {type:'scatter', mode:'lines', name:'有效积分区域', x:xs, y:shaded, line:{color:'#e85d36',width:1}, fill:'tozeroy', fillcolor:fillColor, connectgaps:false},
-            ...(pointTrace ? [pointTrace] : [])
+            ...(pointTrace ? [pointTrace] : []),
+            ...(pointLabels ? [pointLabels] : [])
           ],
           layout:{title:'被积函数与有效积分区间', xaxis:{title:variable}, yaxis:{title:'f('+variable+')'}, template:'plotly_white', height:640, showlegend:true}
         };
@@ -435,20 +479,23 @@
         }
         if (!volumes.positive.i.length && !volumes.negative.i.length) throw new Error('无法为该区域生成体积图；请检查函数奇点或缩小网格范围');
         const pointTrace = queryPoints.length ? {
-          type:'scatter3d', mode:'markers+text', name:'指定取值点',
+          type:'scatter3d', mode:'markers', name:'指定取值点',
           x:queryPoints.map(point => point[nameX]), y:queryPoints.map(point => point[nameY]),
           z:queryPoints.map(point => safeValue(parsed.node, point)),
-          text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-          textposition:'top center', marker:{color:'#111111',size:6}
+          marker:{color:'#d62728',size:6},
+          hovertemplate:`${nameX}=%{x:.6g}<br>${nameY}=%{y:.6g}<br>f=%{z:.6g}<extra>指定取值点</extra>`
         } : null;
         const ranges = { [nameX]:bounds[nameX], [nameY]:bounds[nameY], z:[minZ, maxZ] };
+        const pointLabels = build3DPointLabels(queryPoints, [nameX,nameY,'z'],
+          point => [point[nameX], point[nameY], safeValue(parsed.node, point)], ranges);
         return {
           data:[
             {type:'surface', name:'被积函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis', showscale:true, opacity:.72},
             ...(volumes.positive.i.length ? [{type:'mesh3d',name:'z=0 上方的体积',x:volumes.positive.x,y:volumes.positive.y,z:volumes.positive.z,i:volumes.positive.i,j:volumes.positive.j,k:volumes.positive.k,color:'#e85d36',opacity:.48,flatshading:true,hoverinfo:'skip'}] : []),
             ...(volumes.negative.i.length ? [{type:'mesh3d',name:'z=0 下方的体积（负贡献）',x:volumes.negative.x,y:volumes.negative.y,z:volumes.negative.z,i:volumes.negative.i,j:volumes.negative.j,k:volumes.negative.k,color:'#3578bd',opacity:.48,flatshading:true,hoverinfo:'skip'}] : []),
             ...buildReferencePlanes(ranges, [nameX,nameY,'z']),
-            ...(pointTrace ? [pointTrace] : [])
+            ...(pointTrace ? [pointTrace] : []),
+            ...pointLabels
           ],
           layout:{title:'被积函数曲面与有效积分区域', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'f('+nameX+','+nameY+')'}}, template:'plotly_white', height:720, showlegend:true}
         };
@@ -472,19 +519,21 @@
       }
       if (!valid.x.length) throw new Error('当前积分区域内没有可显示的有效点');
       const pointTrace = queryPoints.length ? {
-        type:'scatter3d', mode:'markers+text', name:'指定取值点',
+        type:'scatter3d', mode:'markers', name:'指定取值点',
         x:queryPoints.map(point => point[nameX]), y:queryPoints.map(point => point[nameY]), z:queryPoints.map(point => point[nameZ]),
-        text:queryPoints.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-        textposition:'top center', marker:{color:'#111111',size:7},
+        marker:{color:'#d62728',size:7},
         customdata:queryPoints.map(point => safeValue(parsed.node, point)),
         hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>指定取值点</extra>`
       } : null;
+      const pointLabels = build3DPointLabels(queryPoints, [nameX,nameY,nameZ],
+        point => [point[nameX], point[nameY], point[nameZ]], bounds);
       return {
         data:[
           {type:'scatter3d', mode:'markers', name:'积分范围', x:coordinates.x, y:coordinates.y, z:coordinates.z, marker:{size:2.2,color:coordinates.value,colorscale:'Portland',opacity:.16}, hoverinfo:'skip'},
           {type:'scatter3d', mode:'markers', name:'有效积分区域', x:valid.x, y:valid.y, z:valid.z, marker:{size:4,color:'#e85d36',opacity:.9}, customdata:valid.value, hovertemplate:`${nameX}=%{x:.3f}<br>${nameY}=%{y:.3f}<br>${nameZ}=%{z:.3f}<br>f=%{customdata:.3f}<extra>有效积分区域</extra>`},
           ...buildReferencePlanes(bounds, [nameX,nameY,nameZ]),
-          ...(pointTrace ? [pointTrace] : [])
+          ...(pointTrace ? [pointTrace] : []),
+          ...pointLabels
         ],
         layout:{title:'三维积分区域（橙色为有效区域）', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true}
       };
@@ -612,11 +661,26 @@
           const radius = safeValue(parsed.node, point);
           return (radius < 0 ? point[variable] + Math.PI : point[variable]) * 180 / Math.PI;
         }),
-        marker:{color:'#111111',size:10}, customdata:points.map(point => [point[variable], safeValue(parsed.node, point)]),
+        marker:{color:'#d62728',size:10}, customdata:points.map(point => [point[variable], safeValue(parsed.node, point)]),
         hovertemplate:'theta=%{customdata[0]:.6g}<br>r=%{customdata[1]:.6g}<extra>指定取值点</extra>'
       } : null;
+      const pointLabels = points.length ? {
+        type:'scatterpolar', mode:'lines+text', name:'取值点坐标',
+        r:points.flatMap(point => {
+          const radius = Math.abs(safeValue(parsed.node, point));
+          return [radius, radius + Math.max(radius * .2, .5), null];
+        }),
+        theta:points.flatMap(point => {
+          const radius = safeValue(parsed.node, point);
+          const angle = (radius < 0 ? point[variable] + Math.PI : point[variable]) * 180 / Math.PI;
+          return [angle, angle, null];
+        }),
+        text:points.flatMap(point => ['', `(${formatPointCoordinate(point[variable])}, ${formatPointCoordinate(safeValue(parsed.node, point))})`, null]),
+        textposition:'middle right', line:{color:'#d62728',width:2}, textfont:{color:'#b51f24',size:12},
+        hoverinfo:'skip', showlegend:false
+      } : null;
       return {
-        data:[{type:'scatterpolar', mode:'lines', name:'极坐标曲线', r:radii, theta:degrees, line:{color:'#e85d36',width:2.5}, connectgaps:false}, ...(pointTrace ? [pointTrace] : [])],
+        data:[{type:'scatterpolar', mode:'lines', name:'极坐标曲线', r:radii, theta:degrees, line:{color:'#e85d36',width:2.5}, connectgaps:false}, ...(pointTrace ? [pointTrace] : []), ...(pointLabels ? [pointLabels] : [])],
         layout:{
           title:`Polar curve: r = ${parsed.normalized}`,
           polar:{angularaxis:{direction:'counterclockwise',rotation:0},radialaxis:{title:'r',rangemode:'tozero'}},
@@ -639,13 +703,23 @@
         const xs = linspace(domains[name], 1000);
         const values = xs.map(x => safeValue(parsed.node, { [name]: x }));
         const pointTrace = points.length ? {
-          type:'scatter', mode:'markers+text', name:'指定取值点',
+          type:'scatter', mode:'markers', name:'指定取值点',
           x:points.map(point => point[name]), y:points.map(point => safeValue(parsed.node, point)),
-          text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-          textposition:'top center', marker:{color:'#111111',size:10},
+          marker:{color:'#d62728',size:9},
           hovertemplate:`${name}=%{x:.6g}<br>f=%{y:.6g}<extra>指定取值点</extra>`
         } : null;
-        return { data:[{type:'scatter', mode:'lines', name:'函数曲线', x:xs, y:values}, ...(pointTrace ? [pointTrace] : [])], layout:{title:'Curve', xaxis:{title:name}, yaxis:{title:'function value'}, template:'plotly_white', height:640} };
+        const pointLabels = points.length ? {
+          type:'scatter', mode:'lines+text', name:'取值点坐标',
+          x:points.flatMap(point => [point[name], point[name], null]),
+          y:points.flatMap(point => {
+            const value = safeValue(parsed.node, point);
+            return [value, value + Math.max(Math.abs(value) * .16, 1), null];
+          }),
+          text:points.flatMap(point => ['', `(${formatPointCoordinate(point[name])}, ${formatPointCoordinate(safeValue(parsed.node, point))})`, null]),
+          textposition:'top center', line:{color:'#d62728',width:2}, textfont:{color:'#b51f24',size:12},
+          hoverinfo:'skip', showlegend:false
+        } : null;
+        return { data:[{type:'scatter', mode:'lines', name:'函数曲线', x:xs, y:values}, ...(pointTrace ? [pointTrace] : []), ...(pointLabels ? [pointLabels] : [])], layout:{title:'Curve', xaxis:{title:name}, yaxis:{title:'function value'}, template:'plotly_white', height:640} };
       }
 
       if (parsed.variables.length === 2) {
@@ -658,15 +732,15 @@
         const finiteValues = z.filter(value => value !== null);
         const minZ = Math.min(...finiteValues), maxZ = Math.max(...finiteValues);
         const pointTrace = points.length ? {
-          type:'scatter3d', mode:'markers+text', name:'指定取值点',
+          type:'scatter3d', mode:'markers', name:'指定取值点',
           x:points.map(point => point[nameX]), y:points.map(point => point[nameY]),
           z:points.map(point => safeValue(parsed.node, point)),
-          text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-          textposition:'top center', marker:{color:'#111111',size:6},
+          marker:{color:'#d62728',size:6},
           hovertemplate:`${nameX}=%{x:.6g}<br>${nameY}=%{y:.6g}<br>f=%{z:.6g}<extra>指定取值点</extra>`
         } : null;
         const ranges = { [nameX]:domains[nameX], [nameY]:domains[nameY], z:[minZ,maxZ] };
-        return { data:[{type:'surface', name:'函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis'}, ...buildReferencePlanes(ranges, [nameX,nameY,'z']), ...(pointTrace ? [pointTrace] : [])], layout:{title:'Surface', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'function value'}}, template:'plotly_white', height:720, showlegend:true} };
+        const pointLabels = build3DPointLabels(points, [nameX,nameY,'z'], point => [point[nameX], point[nameY], safeValue(parsed.node, point)], ranges);
+        return { data:[{type:'surface', name:'函数曲面', x:xs, y:ys, z:zMatrix, colorscale:'Viridis'}, ...buildReferencePlanes(ranges, [nameX,nameY,'z']), ...(pointTrace ? [pointTrace] : []), ...pointLabels], layout:{title:'Surface', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:'function value'}}, template:'plotly_white', height:720, showlegend:true} };
       }
 
       const [nameX, nameY, nameZ] = parsed.variables;
@@ -678,15 +752,15 @@
       }
       if (!cloud.x.length) throw new Error('定义域内没有有限函数值');
       const pointTrace = points.length ? {
-        type:'scatter3d', mode:'markers+text', name:'指定取值点',
+        type:'scatter3d', mode:'markers', name:'指定取值点',
         x:points.map(point => point[nameX]), y:points.map(point => point[nameY]), z:points.map(point => point[nameZ]),
-        text:points.map(point => `f=${safeValue(parsed.node, point).toPrecision(6)}`),
-        textposition:'top center', marker:{color:'#111111',size:7},
+        marker:{color:'#d62728',size:7},
         customdata:points.map(point => safeValue(parsed.node, point)),
         hovertemplate:`${nameX}=%{x:.6g}<br>${nameY}=%{y:.6g}<br>${nameZ}=%{z:.6g}<br>f=%{customdata:.6g}<extra>指定取值点</extra>`
       } : null;
       const ranges = { [nameX]:domains[nameX], [nameY]:domains[nameY], [nameZ]:domains[nameZ] };
-      return { data:[{type:'scatter3d', mode:'markers', name:'函数点云', x:cloud.x, y:cloud.y, z:cloud.z, marker:{size:2.8,color:cloud.color,colorscale:'Portland',opacity:.8}}, ...buildReferencePlanes(ranges, [nameX,nameY,nameZ]), ...(pointTrace ? [pointTrace] : [])], layout:{title:'3D point cloud', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true} };
+      const pointLabels = build3DPointLabels(points, [nameX,nameY,nameZ], point => [point[nameX],point[nameY],point[nameZ]], ranges);
+      return { data:[{type:'scatter3d', mode:'markers', name:'函数点云', x:cloud.x, y:cloud.y, z:cloud.z, marker:{size:2.8,color:cloud.color,colorscale:'Portland',opacity:.8}}, ...buildReferencePlanes(ranges, [nameX,nameY,nameZ]), ...(pointTrace ? [pointTrace] : []), ...pointLabels], layout:{title:'3D point cloud', scene:{xaxis:{title:nameX},yaxis:{title:nameY},zaxis:{title:nameZ}}, template:'plotly_white', height:720, showlegend:true} };
     }
 
     function draw() {
