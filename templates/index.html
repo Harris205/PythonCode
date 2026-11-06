@@ -9,10 +9,10 @@
     :root { --ink:#17211b; --paper:#f4f1e8; --panel:#fffdf7; --accent:#e85d36; --green:#237a57; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; color:var(--ink); background:linear-gradient(135deg,#e8e5d8 0%,#f8f5ed 58%,#dfe9df 100%); font-family:"Segoe UI",sans-serif; }
-    header { display:flex; align-items:end; justify-content:space-between; gap:1rem; padding:24px clamp(18px,4vw,56px) 18px; }
-    h1 { margin:0; max-width:760px; font-family:Georgia,"Times New Roman",serif; font-size:clamp(32px,5vw,66px); line-height:.92; font-weight:700; }
+    header { position:relative; display:flex; align-items:center; justify-content:center; gap:1rem; padding:24px clamp(18px,4vw,56px) 18px; min-height:160px; }
+    h1 { margin:0; max-width:780px; font-family:"STKaiti","KaiTi","Microsoft YaHei","Times New Roman",serif; font-size:clamp(52px,6vw,118px); line-height:0.94; font-weight:700; letter-spacing:0.04em; text-align:center; color:#1a201d; text-shadow:0 1px 0 rgba(255,255,255,.7), 0 8px 22px rgba(15,23,18,.08); transform:scaleY(1.08); }
     .tag { color:#fff; background:var(--green); padding:8px 12px; border-radius:4px; font-size:13px; white-space:nowrap; }
-    .header-meta { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+    .header-meta { position:absolute; right:clamp(18px,4vw,56px); top:24px; display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
     .credit { color:#67665f; font-size:13px; white-space:nowrap; }
     main { display:grid; grid-template-columns:minmax(280px,360px) minmax(0,1fr); gap:18px; padding:0 clamp(18px,4vw,56px) 32px; }
     .panel { background:var(--panel); border:1px solid #cfcbbf; border-radius:8px; box-shadow:0 14px 40px rgba(31,42,35,.08); }
@@ -33,7 +33,7 @@
 </head>
 <body>
   <header>
-    <h1>把表达式<br>变成空间。</h1>
+    <h1>把表达式变成空间</h1>
     <div class="header-meta">
       <div class="tag">本地绘图器 · 1–3 维</div>
       <div class="credit">© Harris205 · 非商业使用 · <a href="https://github.com/Harris205/PythonCode" target="_blank" rel="noopener">项目来源</a></div>
